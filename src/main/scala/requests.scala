@@ -9,7 +9,8 @@ import org.asynchttpclient.request.body.multipart.Part
 import util.IDNDomainHelpers
 
 case class Req(run: RequestBuilder => RequestBuilder,
-                props: Req.Properties = Req.Properties()) extends RequestBuilderVerbs{
+                props: Req.Properties = Req.Properties()
+              ) extends MethodVerbs with UrlVerbs with ParamVerbs with  RequestBuilderVerbs{
   def subject = this
 
   // Append a transform onto the underlying AHC RequestBuilder.
@@ -18,11 +19,25 @@ case class Req(run: RequestBuilder => RequestBuilder,
   }
 
   /// Append a transform onto the underlying AHC RequestBuilder and
-  /// simultaniously transform the Req.Properties.
   def underlying(nextReq: RequestBuilder => RequestBuilder,nextProps: Req.Properties => Req.Properties) = {
     Req(run andThen nextReq, nextProps(props))
   }
 
+  /// convert this to a concrete RequestBuilder setting the Content-Type for
+  def toRequestBuilder = {
+    def requestBuilder = run(new RequestBuilder())
+    //Body set from String and with no Content-Type will get a default of 'text/plain; charset=UTF-8'
+    if(props.bodyType == Req.StringBody && !requestBuilder.build.getHeaders.contains("Content-Type")) {
+      setContentType("text/plain", Charset.forName("UTF-8")).run(new RequestBuilder)
+    } else {
+      requestBuilder
+    }
+  }
+
+  // Convert this to a concrete request.
+  def toRequest = {
+    toRequestBuilder.build
+  }
 }
 
 object Req {
@@ -64,6 +79,22 @@ object url extends (String => Req) {
 
 trait RequestVerbs {
   def subject: Req
+}
+
+trait UrlVerbs extends RequestVerbs {
+  // Retrieve the fully materialized URL.
+  def url = subject.toRequest.getUrl
+
+  // Append a segment to the URL.
+  def / (segment: String) = {
+    val uri = RawUri(url)
+    val encodedSegment = UriEncode.path(segment)
+    val rawPath = uri.path.orElse(Some("/")).map {
+      case u if u.endsWith("/") => u + encodedSegment
+      case u => u + "/" + encodedSegment
+    }
+    subject.setUrl(uri.copy(path=rawPath, query=None).toString)
+  }
 }
 
 trait MethodVerbs extends RequestVerbs {
@@ -110,7 +141,6 @@ trait RequestBuilderVerbs extends RequestVerbs {
   def addQueryParameter(name: String) = {
     subject.underlying(_.addQueryParam(name, null))
   }
-
 
   /// Set query parameters, overwriting any pre-existing query parameters.
   /// If an empty Seq is provided for a key, we will treat that as intending
@@ -232,3 +262,59 @@ trait RequestBuilderVerbs extends RequestVerbs {
     subject.underlying(_.setRealm(realm))
   }
 }
+
+trait ParamVerbs extends RequestVerbs {
+
+  /// Adds `params` to the request body.
+  /// Sets request method to POST unless it has been explicitly set.
+  def << (params: Iterable[(String,String)]) = {
+    params.foldLeft(subject.implyMethod("POST")) {
+      case (s, (key, value)) =>
+        s.addParameter(key, value)
+    }
+  }
+
+  /// Adds `params` to the request body.
+  /// Sets request method to POST unless it has been explicitly set.
+  def appendBodyParams(params: Iterable[(String, String)]) =
+    <<(params)
+
+   /// Set request body to a given string,
+   /// - set method to POST unless explicitly set otherwise
+   /// - set HTTP Content-Type to "text/plain; charset=UTF-8" if unspecified.
+  def << (body: String) = {
+    subject.implyMethod("POST").setBody(body)
+  }
+
+  /// Set request body to a given string,
+  /// - set method to POST unless explicitly set otherwise
+  ///- set HTTP Content-Type to "text/plain; charset=UTF-8" if unspecified.
+  def setStringBody(body: String) =
+    <<(body)
+
+  /// Set a file as the request body and set method to PUT if it's
+  /// not explicitly set.
+  def <<< (file: java.io.File) = {
+    subject.implyMethod("PUT").setBody(file)
+  }
+
+  /// Set a file as the request body and set method to PUT if it's
+  /// not explicitly set.
+  def setFileBody(file: java.io.File) =
+    <<<(file)
+
+
+  /// Adds `params` as query parameters
+  def <<? (params: Iterable[(String,String)]) = {
+    params.foldLeft(subject) {
+      case (s, (key, value)) =>
+        s.addQueryParameter(key, value)
+    }
+  }
+
+  // Adds `params` as query parameters
+  def appendQueryParams(params: Iterable[(String, String)]) = {
+    <<?(params)
+  }
+}
+
